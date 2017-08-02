@@ -1,0 +1,53 @@
+#!/usr/bin/env ruby
+
+# Original Author: Tim Petterson (https://bitbucket.org/tpettersen/)
+
+# Git update hook for determining the build status of the new ref value from a set of Bamboo servers.
+#
+# requires Ruby 1.9.3+ 
+
+require_relative 'ci-util'
+require 'json'
+
+# parse args supplied by git: <ref_name> <old_sha> <new_sha>
+ref = simple_branch_name ARGV[0]
+prevCommit = ARGV[1]
+newCommit = ARGV[2]
+
+# test if the updated ref is one we want to enforce green builds for
+exit_if_not_protected_ref(ref)
+
+# get the tip of the most recently merged branch
+tip_of_merged_branch = find_newest_non_merge_commit(prevCommit, newCommit)
+
+# parse our bamboo server config
+bamboo = read_config("bamboo", ["url", "username", "password"])
+# query bamboo for build results
+response = httpGet(bamboo, "/rest/api/latest/result/byChangeset/#{tip_of_merged_branch}.json")
+body = JSON.parse(response.body)        
+# tally the results
+failed = successful = in_progress = 0
+body['results']['result'].collect { |result|
+    case result['state']
+    when "Failed" 
+      failed += 1
+    when "Successful"
+      successful += 1
+    when "Unknown"
+      if result['lifeCycleState'] == "InProgress"
+        in_progress += 1
+      end
+    end
+}
+
+# display a short message describing the build status for the merged branch and abort if necessary
+if failed > 0
+    # at least one red build - block the branch update
+    abort "#{shortSha(tip_of_merged_branch)} has #{failed} red #{pluralize(failed, 'build', 'builds')}."
+elsif in_progress > 0
+    # at least one incomplete build - block the branch update
+    abort "#{shortSha(tip_of_merged_branch)} has #{in_progress} #{pluralize(in_progress, 'build', 'builds')} that haven't completed yet."
+else    
+    # all green builds - allow the branch update
+    puts "#{shortSha(tip_of_merged_branch)} has #{successful} green #{pluralize(successful, 'build', 'builds')}."
+end
